@@ -330,7 +330,6 @@ EOF
         
         # Cache the webpage using monolith
         local cached_file="$OUTPUT_DIR/story-$story_id.html"
-        local monolith_error
         
         if [ "$VERBOSE" = "1" ]; then
             # In verbose mode, show monolith errors
