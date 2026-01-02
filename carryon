@@ -157,15 +157,32 @@ main() {
     log "API URL: https://hacker-news.firebaseio.com/v0/topstories.json"
     
     local story_ids
-    story_ids=$(curl -s "https://hacker-news.firebaseio.com/v0/topstories.json" | jq -r ".[:$NUM_STORIES] | .[]")
+    local curl_exit_code
+    story_ids=$(curl -s -f "https://hacker-news.firebaseio.com/v0/topstories.json" 2>&1)
+    curl_exit_code=$?
     
-    if [ -z "$story_ids" ]; then
-        error "Failed to fetch story IDs from Hacker News API"
+    if [ $curl_exit_code -ne 0 ]; then
+        error "Failed to connect to Hacker News API (curl exit code: $curl_exit_code)"
+        error "Please check your internet connection and try again"
+        exit 1
+    fi
+    
+    # Parse JSON and extract story IDs
+    story_ids=$(echo "$story_ids" | jq -r ".[:$NUM_STORIES] | .[]" 2>&1)
+    
+    if [ -z "$story_ids" ] || [ $? -ne 0 ]; then
+        error "Failed to parse story IDs from Hacker News API response"
         exit 1
     fi
     
     local total_stories
-    total_stories=$(echo "$story_ids" | wc -l | tr -d ' ')
+    total_stories=$(echo "$story_ids" | grep -c '^')
+    
+    if [ "$total_stories" -eq 0 ]; then
+        error "No stories found from Hacker News API"
+        exit 1
+    fi
+    
     echo "Found $total_stories stories to download"
     echo ""
     
@@ -313,12 +330,32 @@ EOF
         
         # Cache the webpage using monolith
         local cached_file="$OUTPUT_DIR/story-$story_id.html"
+        local monolith_error
         
-        if monolith -I -j "$url" -o "$cached_file" 2>/dev/null; then
-            log "Successfully cached: $title"
-            successful=$((successful + 1))
-            
-            # Add entry to index
+        if [ "$VERBOSE" = "1" ]; then
+            # In verbose mode, show monolith errors
+            if monolith -I -j "$url" -o "$cached_file" 2>&1; then
+                log "Successfully cached: $title"
+                successful=$((successful + 1))
+            else
+                warn "Failed to cache story $story_id: $title"
+                failed=$((failed + 1))
+                cached_file=""
+            fi
+        else
+            # In quiet mode, suppress monolith errors
+            if monolith -I -j "$url" -o "$cached_file" 2>/dev/null; then
+                log "Successfully cached: $title"
+                successful=$((successful + 1))
+            else
+                warn "Failed to cache story $story_id: $title"
+                failed=$((failed + 1))
+                cached_file=""
+            fi
+        fi
+        
+        if [ -n "$cached_file" ] && [ -f "$cached_file" ]; then
+            # Add entry to index with local cached file
             cat >> "$index_file" << EOF
         <div class="story">
             <div class="story-title">
@@ -333,10 +370,7 @@ EOF
         </div>
 EOF
         else
-            warn "Failed to cache story $story_id: $title"
-            failed=$((failed + 1))
-            
-            # Add entry with external link
+            # Add entry with external link (caching failed)
             cat >> "$index_file" << EOF
         <div class="story">
             <div class="story-title">
@@ -361,7 +395,7 @@ EOF
     </div>
     <script>
         document.getElementById('generation-date').textContent = new Date().toLocaleString();
-        document.getElementById('story-count').textContent = '$total_stories';
+        document.getElementById('story-count').textContent = '$count';
     </script>
 </body>
 </html>
@@ -372,7 +406,7 @@ EOF_HTML
     echo "✅ Complete!"
     echo ""
     echo "Summary:"
-    echo "  Total stories: $total_stories"
+    echo "  Total stories processed: $count"
     echo "  Successfully cached: $successful"
     echo "  Failed: $failed"
     echo ""
