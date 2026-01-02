@@ -92,11 +92,34 @@ check_dependencies() {
     fi
 }
 
+# Function to escape HTML entities
+html_escape() {
+    local text="$1"
+    # Use printf and sed for proper HTML entity escaping
+    printf '%s' "$text" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'\''/\&#39;/g'
+}
+
+# Function to validate URL scheme
+is_safe_url() {
+    local url="$1"
+    # Check if URL starts with http:// or https://
+    if [[ "$url" =~ ^https?:// ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 # Parse command line arguments
 while getopts "n:o:vh" opt; do
     case $opt in
         n)
             NUM_STORIES=$OPTARG
+            # Validate NUM_STORIES is a positive integer
+            if ! [[ "$NUM_STORIES" =~ ^[0-9]+$ ]] || [ "$NUM_STORIES" -lt 1 ]; then
+                error "Number of stories must be a positive integer"
+                exit 1
+            fi
             ;;
         o)
             OUTPUT_DIR=$OPTARG
@@ -255,6 +278,12 @@ EOF_HTML
         score=$(echo "$story_json" | jq -r '.score // 0')
         author=$(echo "$story_json" | jq -r '.by // "unknown"')
         
+        # Escape HTML entities in title and author for safe insertion
+        local title_escaped
+        local author_escaped
+        title_escaped=$(html_escape "$title")
+        author_escaped=$(html_escape "$author")
+        
         # Skip stories without URLs (Ask HN, Show HN without links, etc.)
         if [ -z "$url" ] || [ "$url" = "null" ]; then
             log "Story $story_id has no URL, skipping"
@@ -264,14 +293,21 @@ EOF_HTML
         <div class="story">
             <div class="story-title">
                 <span class="rank">$count.</span>
-                <a href="$hn_url" target="_blank">$title</a>
+                <a href="$hn_url" target="_blank">$title_escaped</a>
             </div>
             <div class="story-meta">
-                <span class="score">$score points</span> by $author | 
+                <span class="score">$score points</span> by $author_escaped | 
                 <a href="$hn_url" target="_blank">discuss on HN</a>
             </div>
         </div>
 EOF
+            continue
+        fi
+        
+        # Validate URL scheme for security
+        if ! is_safe_url "$url"; then
+            warn "Story $story_id has unsafe URL scheme, skipping: $url"
+            failed=$((failed + 1))
             continue
         fi
         
@@ -287,10 +323,10 @@ EOF
         <div class="story">
             <div class="story-title">
                 <span class="rank">$count.</span>
-                <a href="story-$story_id.html">$title</a>
+                <a href="story-$story_id.html">$title_escaped</a>
             </div>
             <div class="story-meta">
-                <span class="score">$score points</span> by $author | 
+                <span class="score">$score points</span> by $author_escaped | 
                 <a href="$url" target="_blank">original</a> | 
                 <a href="https://news.ycombinator.com/item?id=$story_id" target="_blank">discuss</a>
             </div>
@@ -305,10 +341,10 @@ EOF
         <div class="story">
             <div class="story-title">
                 <span class="rank">$count.</span>
-                <a href="$url" target="_blank">$title</a>
+                <a href="$url" target="_blank">$title_escaped</a>
             </div>
             <div class="story-meta">
-                <span class="score">$score points</span> by $author | 
+                <span class="score">$score points</span> by $author_escaped | 
                 <a href="https://news.ycombinator.com/item?id=$story_id" target="_blank">discuss</a> | 
                 <em>caching failed</em>
             </div>
