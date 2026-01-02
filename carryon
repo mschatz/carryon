@@ -1,0 +1,417 @@
+#!/bin/bash
+
+# carryon - Prepare web content for offline reading
+# Downloads top Hacker News stories and caches them for offline viewing
+
+set -e
+
+# Default configuration
+NUM_STORIES=${CARRYON_NUM_STORIES:-500}
+OUTPUT_DIR=${CARRYON_OUTPUT_DIR:-"$HOME/carryon-cache"}
+VERBOSE=${CARRYON_VERBOSE:-0}
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Function to print usage
+usage() {
+    cat << EOF
+Usage: carryon [OPTIONS]
+
+Prepare web content for offline reading by downloading top Hacker News stories.
+
+OPTIONS:
+    -n NUM      Number of stories to download (default: 500)
+    -o DIR      Output directory (default: ~/carryon-cache)
+    -v          Verbose output
+    -h          Show this help message
+
+ENVIRONMENT VARIABLES:
+    CARRYON_NUM_STORIES    Number of stories (default: 500)
+    CARRYON_OUTPUT_DIR     Output directory (default: ~/carryon-cache)
+    CARRYON_VERBOSE        Enable verbose output (default: 0)
+
+DEPENDENCIES:
+    - curl: for fetching HN API data
+    - monolith: for caching webpages (install with: brew install monolith)
+    - jq: for JSON parsing (install with: brew install jq)
+
+EXAMPLES:
+    carryon                 # Download top 500 stories
+    carryon -n 100          # Download top 100 stories
+    carryon -n 50 -o ./hn   # Download 50 stories to ./hn directory
+    carryon -v -n 10        # Download 10 stories with verbose output
+
+EOF
+}
+
+# Function to log messages
+log() {
+    if [ "$VERBOSE" = "1" ]; then
+        echo -e "${GREEN}[INFO]${NC} $1"
+    fi
+}
+
+# Function to log errors
+error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+# Function to log warnings
+warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+# Function to check dependencies
+check_dependencies() {
+    local missing_deps=()
+    
+    if ! command -v curl &> /dev/null; then
+        missing_deps+=("curl")
+    fi
+    
+    if ! command -v jq &> /dev/null; then
+        missing_deps+=("jq")
+    fi
+    
+    if ! command -v monolith &> /dev/null; then
+        missing_deps+=("monolith")
+    fi
+    
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        error "Missing required dependencies: ${missing_deps[*]}"
+        echo ""
+        echo "Install missing dependencies:"
+        for dep in "${missing_deps[@]}"; do
+            echo "  brew install $dep"
+        done
+        exit 1
+    fi
+}
+
+# Function to escape HTML entities
+html_escape() {
+    local text="$1"
+    # Use printf and sed for proper HTML entity escaping
+    printf '%s' "$text" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'\''/\&#39;/g'
+}
+
+# Function to validate URL scheme
+is_safe_url() {
+    local url="$1"
+    # Check if URL starts with http:// or https://
+    if [[ "$url" =~ ^https?:// ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Parse command line arguments
+while getopts "n:o:vh" opt; do
+    case $opt in
+        n)
+            NUM_STORIES=$OPTARG
+            # Validate NUM_STORIES is a positive integer
+            if ! [[ "$NUM_STORIES" =~ ^[0-9]+$ ]] || [ "$NUM_STORIES" -lt 1 ]; then
+                error "Number of stories must be a positive integer"
+                exit 1
+            fi
+            ;;
+        o)
+            OUTPUT_DIR=$OPTARG
+            ;;
+        v)
+            VERBOSE=1
+            ;;
+        h)
+            usage
+            exit 0
+            ;;
+        \?)
+            error "Invalid option: -$OPTARG"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# Main execution
+main() {
+    echo "carryon - Preparing web content for offline reading"
+    echo ""
+    
+    # Check dependencies
+    log "Checking dependencies..."
+    check_dependencies
+    
+    # Create output directory
+    log "Creating output directory: $OUTPUT_DIR"
+    mkdir -p "$OUTPUT_DIR"
+    
+    # Fetch top story IDs from Hacker News
+    echo "Fetching top $NUM_STORIES Hacker News stories..."
+    log "API URL: https://hacker-news.firebaseio.com/v0/topstories.json"
+    
+    local story_ids
+    local curl_exit_code
+    story_ids=$(curl -s -f "https://hacker-news.firebaseio.com/v0/topstories.json" 2>&1)
+    curl_exit_code=$?
+    
+    if [ $curl_exit_code -ne 0 ]; then
+        error "Failed to connect to Hacker News API (curl exit code: $curl_exit_code)"
+        error "Please check your internet connection and try again"
+        exit 1
+    fi
+    
+    # Parse JSON and extract story IDs
+    story_ids=$(echo "$story_ids" | jq -r ".[:$NUM_STORIES] | .[]" 2>&1)
+    
+    if [ -z "$story_ids" ] || [ $? -ne 0 ]; then
+        error "Failed to parse story IDs from Hacker News API response"
+        exit 1
+    fi
+    
+    local total_stories
+    total_stories=$(echo "$story_ids" | grep -c '^')
+    
+    if [ "$total_stories" -eq 0 ]; then
+        error "No stories found from Hacker News API"
+        exit 1
+    fi
+    
+    echo "Found $total_stories stories to download"
+    echo ""
+    
+    # Initialize index HTML
+    local index_file="$OUTPUT_DIR/index.html"
+    cat > "$index_file" << 'EOF_HTML'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hacker News Offline Cache</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 0 20px;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f6f6ef;
+        }
+        h1 {
+            color: #ff6600;
+            border-bottom: 2px solid #ff6600;
+            padding-bottom: 10px;
+        }
+        .meta {
+            color: #828282;
+            font-size: 0.9em;
+            margin-bottom: 40px;
+        }
+        .story {
+            background: white;
+            margin-bottom: 15px;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .story-title {
+            font-size: 1.1em;
+            margin-bottom: 5px;
+        }
+        .story-title a {
+            color: #000;
+            text-decoration: none;
+        }
+        .story-title a:hover {
+            color: #ff6600;
+        }
+        .story-meta {
+            font-size: 0.85em;
+            color: #828282;
+        }
+        .rank {
+            color: #ff6600;
+            font-weight: bold;
+            margin-right: 10px;
+        }
+        .score {
+            margin-right: 10px;
+        }
+        .footer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            text-align: center;
+            color: #828282;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <h1>🛫 Hacker News Offline Cache</h1>
+    <div class="meta">
+        Generated on <span id="generation-date"></span> | 
+        <span id="story-count"></span> stories cached
+    </div>
+    <div id="stories">
+EOF_HTML
+    
+    # Process each story
+    local count=0
+    local successful=0
+    local failed=0
+    
+    for story_id in $story_ids; do
+        count=$((count + 1))
+        
+        echo -ne "Processing story $count/$total_stories (ID: $story_id)...\r"
+        
+        # Fetch story details
+        local story_json
+        story_json=$(curl -s "https://hacker-news.firebaseio.com/v0/item/$story_id.json")
+        
+        if [ -z "$story_json" ]; then
+            log "Failed to fetch story $story_id"
+            failed=$((failed + 1))
+            continue
+        fi
+        
+        # Extract story details
+        local title
+        local url
+        local score
+        local author
+        
+        title=$(echo "$story_json" | jq -r '.title // "No title"')
+        url=$(echo "$story_json" | jq -r '.url // empty')
+        score=$(echo "$story_json" | jq -r '.score // 0')
+        author=$(echo "$story_json" | jq -r '.by // "unknown"')
+        
+        # Escape HTML entities in title and author for safe insertion
+        local title_escaped
+        local author_escaped
+        title_escaped=$(html_escape "$title")
+        author_escaped=$(html_escape "$author")
+        
+        # Skip stories without URLs (Ask HN, Show HN without links, etc.)
+        if [ -z "$url" ] || [ "$url" = "null" ]; then
+            log "Story $story_id has no URL, skipping"
+            # Still add to index but link to HN discussion
+            local hn_url="https://news.ycombinator.com/item?id=$story_id"
+            cat >> "$index_file" << EOF
+        <div class="story">
+            <div class="story-title">
+                <span class="rank">$count.</span>
+                <a href="$hn_url" target="_blank">$title_escaped</a>
+            </div>
+            <div class="story-meta">
+                <span class="score">$score points</span> by $author_escaped | 
+                <a href="$hn_url" target="_blank">discuss on HN</a>
+            </div>
+        </div>
+EOF
+            continue
+        fi
+        
+        # Validate URL scheme for security
+        if ! is_safe_url "$url"; then
+            warn "Story $story_id has unsafe URL scheme, skipping: $url"
+            failed=$((failed + 1))
+            continue
+        fi
+        
+        # Cache the webpage using monolith
+        local cached_file="$OUTPUT_DIR/story-$story_id.html"
+        
+        if [ "$VERBOSE" = "1" ]; then
+            # In verbose mode, show monolith errors
+            if monolith -I -j "$url" -o "$cached_file" 2>&1; then
+                log "Successfully cached: $title"
+                successful=$((successful + 1))
+            else
+                warn "Failed to cache story $story_id: $title"
+                failed=$((failed + 1))
+                cached_file=""
+            fi
+        else
+            # In quiet mode, suppress monolith errors
+            if monolith -I -j "$url" -o "$cached_file" 2>/dev/null; then
+                log "Successfully cached: $title"
+                successful=$((successful + 1))
+            else
+                warn "Failed to cache story $story_id: $title"
+                failed=$((failed + 1))
+                cached_file=""
+            fi
+        fi
+        
+        if [ -n "$cached_file" ] && [ -f "$cached_file" ]; then
+            # Add entry to index with local cached file
+            cat >> "$index_file" << EOF
+        <div class="story">
+            <div class="story-title">
+                <span class="rank">$count.</span>
+                <a href="story-$story_id.html">$title_escaped</a>
+            </div>
+            <div class="story-meta">
+                <span class="score">$score points</span> by $author_escaped | 
+                <a href="$url" target="_blank">original</a> | 
+                <a href="https://news.ycombinator.com/item?id=$story_id" target="_blank">discuss</a>
+            </div>
+        </div>
+EOF
+        else
+            # Add entry with external link (caching failed)
+            cat >> "$index_file" << EOF
+        <div class="story">
+            <div class="story-title">
+                <span class="rank">$count.</span>
+                <a href="$url" target="_blank">$title_escaped</a>
+            </div>
+            <div class="story-meta">
+                <span class="score">$score points</span> by $author_escaped | 
+                <a href="https://news.ycombinator.com/item?id=$story_id" target="_blank">discuss</a> | 
+                <em>caching failed</em>
+            </div>
+        </div>
+EOF
+        fi
+    done
+    
+    # Complete the index HTML
+    cat >> "$index_file" << EOF_HTML
+    </div>
+    <div class="footer">
+        Generated by carryon | $successful successfully cached, $failed failed
+    </div>
+    <script>
+        document.getElementById('generation-date').textContent = new Date().toLocaleString();
+        document.getElementById('story-count').textContent = '$count';
+    </script>
+</body>
+</html>
+EOF_HTML
+    
+    echo ""
+    echo ""
+    echo "✅ Complete!"
+    echo ""
+    echo "Summary:"
+    echo "  Total stories processed: $count"
+    echo "  Successfully cached: $successful"
+    echo "  Failed: $failed"
+    echo ""
+    echo "Output directory: $OUTPUT_DIR"
+    echo "Open index.html to browse: open $OUTPUT_DIR/index.html"
+}
+
+# Run main function
+main
